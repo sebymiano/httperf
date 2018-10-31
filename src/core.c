@@ -87,6 +87,18 @@
 #define MAX_IP_PORT	65535
 #define BITSPERLONG	(8*sizeof (u_long))
 
+#define EXT_FD_SETSIZE 65536
+typedef struct
+{
+    long __fds_bits[EXT_FD_SETSIZE / 8 / sizeof(long)];
+} ext_fd_set;
+
+typedef struct
+{
+    long __fds_bits[EXT_FD_SETSIZE / 8 / sizeof(long)];
+} ext_fd_mask;
+
+
 struct local_addr {
 	struct in_addr ip;
 	u_long port_free_map[((MAX_IP_PORT - MIN_IP_PORT + BITSPERLONG)
@@ -107,7 +119,7 @@ static u_long   max_burst_len;
 #ifdef HAVE_KEVENT
 static int	kq, max_sd = 0;
 #else
-static fd_set   rdfds, wrfds;
+static ext_fd_set   rdfds, wrfds;
 static int      min_sd = 0x7fffffff, max_sd = 0, alloced_sd_to_conn = 0;
 static struct timeval select_timeout;
 #endif
@@ -171,6 +183,8 @@ static u_int    syscall_count[SC_NUM_SYSCALLS];
     while (errno == EINTR);			\
   }
 #endif
+
+#define NFDBITS	(sizeof(ext_fd_mask) * NBBY)	/* bits per mask */
 
 struct hash_entry {
 	const char     *hostname;
@@ -374,7 +388,7 @@ clear_active(Conn * s, enum IO_DIR dir)
 		exit(1);
 	}
 #else
-	fd_set *	fdset;
+	ext_fd_set *	fdset;
 	
 	if (dir == WRITE)
 		fdset = &wrfds;
@@ -405,7 +419,7 @@ set_active(Conn * s, enum IO_DIR dir)
 		exit(1);
 	}
 #else
-	fd_set *	fdset;
+	ext_fd_set *	fdset;
 	
 	if (dir == WRITE)
 		fdset = &wrfds;
@@ -1449,8 +1463,8 @@ void
 core_loop(void)
 {
 	int        is_readable, is_writable, n, sd, bit, min_i, max_i, i = 0;
-	fd_set     readable, writable;
-	fd_mask    mask;
+	ext_fd_set     readable, writable;
+	ext_fd_mask    mask;
 	Any_Type   arg;
 	Conn      *conn;
  
@@ -1464,7 +1478,7 @@ core_loop(void)
 	    min_i = min_sd / NFDBITS;
 	    max_i = max_sd / NFDBITS;
 
-	    SYSCALL(SELECT,	n = select(max_sd + 1, &readable, &writable, 0, &tv));
+	    SYSCALL(SELECT,	n = select(max_sd + 1, (fd_set*)&readable, (fd_set*)&writable, 0, &tv));
 
 	    ++iteration;
 
