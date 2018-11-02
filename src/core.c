@@ -419,7 +419,7 @@ set_active(Conn * s, enum IO_DIR dir)
 #else
 	struct epoll_event ev;
 	int ret = 0;
-		
+
 	if (dir == WRITE) {
 		ev.events = EPOLLOUT;
 	} else {
@@ -427,22 +427,19 @@ set_active(Conn * s, enum IO_DIR dir)
 	}
 	ev.data.fd = sd;
 
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sd, &ev) == -1) {
-        fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d in set_active", sd);
-        exit(1);
-    }
+	ret = epoll_ctl(epollfd, EPOLL_CTL_ADD, sd, &ev);
 
-	if (ref == EEXIST) {
+	if (ret == EEXIST) {
 		ev.events = ev.events | ((dir == WRITE) ? EPOLLOUT : EPOLLIN);
-        ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, sd, &ev);
-        if (ret == -1){
-        	fprintf(stderr, "Error in epoll_ctl: set_active\n");
+        	ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, sd, &ev);
+		if (ret == -1) {
+			fprintf(stderr, "Error in epoll_ctl_mod: set_active\n");
+			exit(1);
+		}
+        } else {
+        	fprintf(stderr, "Error in epoll_ctl: add failed in set_active\n");
     		exit(1);
         }
-    } else if (ref == -1) {
-    	fprintf(stderr, "Error in epoll_ctl: set_active\n");
-    	exit(1);
-    }
 
 	if (sd < min_sd)
 		min_sd = sd;
