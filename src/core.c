@@ -429,15 +429,15 @@ set_active(Conn * s, enum IO_DIR dir)
 
 	ret = epoll_ctl(epollfd, EPOLL_CTL_ADD, sd, &ev);
 
-	if (ret == EEXIST) {
+	if (ret == -1 && errno == EEXIST) {
 		ev.events = ev.events | ((dir == WRITE) ? EPOLLOUT : EPOLLIN);
         	ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, sd, &ev);
 		if (ret == -1) {
-			fprintf(stderr, "Error in epoll_ctl_mod: set_active\n");
+			fprintf(stderr, "Error in epoll_ctl_mod: set_active. Error: %s\n", strerror(errno));
 			exit(1);
 		}
-        } else {
-        	fprintf(stderr, "Error in epoll_ctl: add failed in set_active\n");
+        } else if (ret != 0) {
+        	fprintf(stderr, "Error in epoll_ctl: add failed in set_active. Error: %s, %d\n", strerror(errno), ret);
     		exit(1);
         }
 
@@ -1404,12 +1404,7 @@ core_close(Conn * conn)
 	if (sd >= 0) {
 		close(sd);
 #ifndef HAVE_KEVENT
-		sd_to_conn[sd] = 0;
-
-        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, sd, NULL) == -1) {
-            fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d", sd);
-            exit(1);
-        }
+	sd_to_conn[sd] = 0;
 
 #endif
 		conn->reading = 0;
