@@ -379,13 +379,18 @@ clear_active(Conn * s, enum IO_DIR dir)
 	struct epoll_event ev;
 	
 	if (dir == WRITE)
-		ev.events = (ev.events & (~EPOLLOUT));
+		ev.events = EPOLLIN;
 	else
-		ev.events = (ev.events & (~EPOLLIN));
+		ev.events = EPOLLOUT;
 
-    ev.data.fd = sd;
-    if (epoll_ctl(epollfd, EPOLL_CTL_MOD, sd, &ev) == -1) {
-        fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d", sd);
+	ev.data.fd = sd;
+	if (epoll_ctl(epollfd, EPOLL_CTL_DEL, sd, NULL) == -1) {
+        fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d in clear_active", sd);
+        exit(1);
+    }
+
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sd, &ev) == -1) {
+        fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d in clear_active", sd);
         exit(1);
     }
 #endif
@@ -413,6 +418,7 @@ set_active(Conn * s, enum IO_DIR dir)
 	}
 #else
 	struct epoll_event ev;
+	int ret = 0;
 		
 	if (dir == WRITE) {
 		ev.events = EPOLLOUT;
@@ -422,8 +428,20 @@ set_active(Conn * s, enum IO_DIR dir)
 	ev.data.fd = sd;
 
 	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sd, &ev) == -1) {
-    	perror("epoll_ctl: listen_sock");
-        exit(EXIT_FAILURE);
+        fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d in set_active", sd);
+        exit(1);
+    }
+
+	if (ref == EEXIST) {
+		ev.events = ev.events | ((dir == WRITE) ? EPOLLOUT : EPOLLIN);
+        ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, sd, &ev);
+        if (ret == -1){
+        	fprintf(stderr, "Error in epoll_ctl: set_active\n");
+    		exit(1);
+        }
+    } else if (ref == -1) {
+    	fprintf(stderr, "Error in epoll_ctl: set_active\n");
+    	exit(1);
     }
 
 	if (sd < min_sd)
@@ -1389,12 +1407,9 @@ core_close(Conn * conn)
 	if (sd >= 0) {
 		close(sd);
 #ifndef HAVE_KEVENT
-		struct epoll_event ev;
 		sd_to_conn[sd] = 0;
 
-		ev.events = (EPOLLIN|EPOLLOUT);
-        ev.data.fd = sd;
-        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, sd, &ev) == -1) {
+        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, sd, NULL) == -1) {
             fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d", sd);
             exit(1);
         }
