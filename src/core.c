@@ -153,12 +153,12 @@ static char     http11req_nohost[] =
 enum Syscalls {
 	SC_BIND, SC_CONNECT, SC_READ, SC_SELECT, SC_SOCKET, SC_WRITEV,
 	SC_SSL_READ, SC_SSL_WRITEV, SC_KEVENT,
-	SC_NUM_SYSCALLS
+	SC_NUM_SYSCALLS, SC_EPOLL_WAIT
 };
 
 static const char *const syscall_name[SC_NUM_SYSCALLS] = {
 	"bind", "connct", "read", "select", "socket", "writev",
-	"ssl_read", "ssl_writev", "kevent"
+	"ssl_read", "ssl_writev", "kevent", "epoll_wait"
 };
 static Time     syscall_time[SC_NUM_SYSCALLS];
 static u_int    syscall_count[SC_NUM_SYSCALLS];
@@ -433,13 +433,13 @@ set_active(Conn * s, enum IO_DIR dir)
 		ev.events = ev.events | ((dir == WRITE) ? EPOLLOUT : EPOLLIN);
         	ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, sd, &ev);
 		if (ret == -1) {
-			fprintf(stderr, "Error in epoll_ctl_mod: set_active\n");
+			fprintf(stderr, "Error in epoll_ctl_mod: set_active. Error: %s\n", strerror(errno));
 			exit(1);
 		}
-        } else {
-        	fprintf(stderr, "Error in epoll_ctl: add failed in set_active\n");
+    } else {
+        	fprintf(stderr, "Error in epoll_ctl: add failed in set_active. Error: %s\n", strerror(errno));
     		exit(1);
-        }
+    }
 
 	if (sd < min_sd)
 		min_sd = sd;
@@ -1406,10 +1406,10 @@ core_close(Conn * conn)
 #ifndef HAVE_KEVENT
 		sd_to_conn[sd] = 0;
 
-        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, sd, NULL) == -1) {
-            fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d", sd);
+        /*if (epoll_ctl(epollfd, EPOLL_CTL_DEL, sd, NULL) == -1) {
+            fprintf(stderr, "epoll_ctl: failed deleting file descriptor %d", sd);
             exit(1);
-        }
+        }*/
 
 #endif
 		conn->reading = 0;
@@ -1497,7 +1497,8 @@ core_loop(void)
 
 	    timer_tick();
 
-	    nfds = epoll_wait(epollfd, events, MAX_EVENTS, epoll_millis);
+	    //nfds = epoll_wait(epollfd, events, MAX_EVENTS, epoll_millis);
+	    SYSCALL(EPOLL_WAIT, nfds = epoll_wait(epollfd, events, MAX_EVENTS, epoll_millis));
 	    //SYSCALL(SELECT,	n = select(max_sd + 1, &readable, &writable, 0, &tv));
 
 	    ++iteration;
