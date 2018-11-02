@@ -50,6 +50,7 @@
 #include <sys/time.h>
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
+#include <sys/epoll.h>
 #endif
 #ifdef HAVE_KEVENT
 #include <sys/event.h>
@@ -86,6 +87,7 @@
 #define MIN_IP_PORT	IPPORT_RESERVED
 #define MAX_IP_PORT	65535
 #define BITSPERLONG	(8*sizeof (u_long))
+#define MAX_EVENTS 65536
 
 struct local_addr {
 	struct in_addr ip;
@@ -107,7 +109,7 @@ static u_long   max_burst_len;
 #ifdef HAVE_KEVENT
 static int	kq, max_sd = 0;
 #else
-static fd_set   rdfds, wrfds;
+static int 		epollfd = 0;
 static int      min_sd = 0x7fffffff, max_sd = 0, alloced_sd_to_conn = 0;
 static struct timeval select_timeout;
 #endif
@@ -374,13 +376,18 @@ clear_active(Conn * s, enum IO_DIR dir)
 		exit(1);
 	}
 #else
-	fd_set *	fdset;
+	struct epoll_event ev;
 	
 	if (dir == WRITE)
-		fdset = &wrfds;
+		ev.events = (ev.events & (~EPOLLOUT));
 	else
-		fdset = &rdfds;
-	FD_CLR(sd, fdset);
+		ev.events = (ev.events & (~EPOLLIN));
+
+    ev.data.fd = sd;
+    if (epoll_ctl(epollfd, EPOLL_CTL_MOD, sd, &ev) == -1) {
+        fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d", sd);
+        exit(1);
+    }
 #endif
 	if (dir == WRITE)
 		s->writing = 0;
@@ -405,13 +412,20 @@ set_active(Conn * s, enum IO_DIR dir)
 		exit(1);
 	}
 #else
-	fd_set *	fdset;
-	
-	if (dir == WRITE)
-		fdset = &wrfds;
-	else
-		fdset = &rdfds;
-	FD_SET(sd, fdset);
+	struct epoll_event ev;
+		
+	if (dir == WRITE) {
+		ev.events = EPOLLOUT;
+	} else {
+		ev.events = EPOLLIN;
+	}
+	ev.data.fd = sd;
+
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sd, &ev) == -1) {
+    	perror("epoll_ctl: listen_sock");
+        exit(EXIT_FAILURE);
+    }
+
 	if (sd < min_sd)
 		min_sd = sd;
 #endif
@@ -883,8 +897,7 @@ core_init(void)
 
 	memset(&hash_table, 0, sizeof(hash_table));
 #ifndef HAVE_KEVENT
-	memset(&rdfds, 0, sizeof(rdfds));
-	memset(&wrfds, 0, sizeof(wrfds));
+	epollfd = 0;
 #endif
 	memset(&myaddr, 0, sizeof(myaddr));
 #ifdef __FreeBSD__
@@ -972,6 +985,12 @@ core_init(void)
 		arg.l = 0;
 		timer_schedule(core_runtime_timer, arg, param.runtime);
 	}
+
+	epollfd = epoll_create1(EPOLL_CLOEXEC);
+    if (epollfd == -1) {
+    	fprintf(stderr, "%s epoll_create1 failed: %s\n", prog_name, strerror(errno));
+        exit(1);
+    }
 }
 
 #ifdef HAVE_SSL
@@ -1370,9 +1389,16 @@ core_close(Conn * conn)
 	if (sd >= 0) {
 		close(sd);
 #ifndef HAVE_KEVENT
+		struct epoll_event ev;
 		sd_to_conn[sd] = 0;
-		FD_CLR(sd, &wrfds);
-		FD_CLR(sd, &rdfds);
+
+		ev.events = (EPOLLIN|EPOLLOUT);
+        ev.data.fd = sd;
+        if (epoll_ctl(epollfd, EPOLL_CTL_DEL, sd, &ev) == -1) {
+            fprintf(stderr, "epoll_ctl: failed deleting file descriotor %d", sd);
+            exit(1);
+        }
+
 #endif
 		conn->reading = 0;
 		conn->writing = 0;
@@ -1448,95 +1474,71 @@ core_loop(void)
 void
 core_loop(void)
 {
-	int        is_readable, is_writable, n, sd, bit, min_i, max_i, i = 0;
-	fd_set     readable, writable;
-	fd_mask    mask;
+	int        is_readable, is_writable, nfds, sd, i = 0;
+	struct 	   epoll_event ev, events[MAX_EVENTS];
 	Any_Type   arg;
 	Conn      *conn;
  
 	while (running) {
 	    struct timeval  tv = select_timeout;
+	    uint64_t epoll_millis = (tv.tv_sec * (uint64_t)1000) + (tv.tv_usec / 1000);
 
 	    timer_tick();
 
-	    readable = rdfds;
-	    writable = wrfds;
-	    min_i = min_sd / NFDBITS;
-	    max_i = max_sd / NFDBITS;
-
-	    SYSCALL(SELECT,	n = select(max_sd + 1, &readable, &writable, 0, &tv));
+	    nfds = epoll_wait(epollfd, events, MAX_EVENTS, epoll_millis);
+	    //SYSCALL(SELECT,	n = select(max_sd + 1, &readable, &writable, 0, &tv));
 
 	    ++iteration;
 
-	    if (n <= 0) {
-	        if (n < 0) {
-	            fprintf(stderr, "%s.core_loop: select failed: %s\n", prog_name, strerror(errno));
+	    if (nfds <= 0) {
+	        if (nfds < 0) {
+	            fprintf(stderr, "%s.core_loop: epoll_wait failed: %s\n", prog_name, strerror(errno));
 	            exit(1);
 	        }
 	        continue;
 	    }
 
-	    while (n > 0) {
-	        /*
-	         * find the index of the fdmask that has something
-	         * going on: 
-	         */
-	        do {
-	            ++i;
-	            if (i > max_i)
-	                i = min_i;
+	    for (i = 0; i < nfds; ++i) {
+            is_readable = (events[i].events & EPOLLIN);
+            is_writable = (events[i].events & EPOLLOUT);
+            sd = events[i].data.fd;
+            
+            if (is_readable || is_writable) {
+                /*
+                 * only handle sockets that
+                 * haven't timed out yet
+                 */
+                conn = sd_to_conn[sd];
+                conn_inc_ref(conn);
 
-	            assert(i <= max_i);
-	            mask = readable.fds_bits[i] | writable.fds_bits[i];
-	        } while (!mask);
-	        bit = 0;
-	        sd = i * NFDBITS + bit;
-	        do {
-	            if (mask & 1) {
-	                --n;
-	                is_readable = (FD_ISSET(sd, &readable) && FD_ISSET(sd, &rdfds));
-	                is_writable = (FD_ISSET(sd, &writable) && FD_ISSET(sd, &wrfds));
-	                
-	                if (is_readable || is_writable) {
-	                    /*
-	                     * only handle sockets that
-	                     * haven't timed out yet
-	                     */
-	                    conn = sd_to_conn[sd];
-	                    conn_inc_ref(conn);
-
-	                    if (conn->watchdog) {
-	                        timer_cancel(conn->watchdog);
-	                        conn->watchdog = 0;
-	                    }
-	                    if (conn->state == S_CONNECTING) {
+                if (conn->watchdog) {
+                    timer_cancel(conn->watchdog);
+                    conn->watchdog = 0;
+                }
+                if (conn->state == S_CONNECTING) {
 #ifdef HAVE_SSL
-	                        if (param.use_ssl)
-	                             core_ssl_connect(conn);
-	                        else
+                    if (param.use_ssl)
+                         core_ssl_connect(conn);
+                    else
 #endif
-	                        if (is_writable) {
-				    clear_active(conn, WRITE);
-	                            conn->state = S_CONNECTED;
-	                            arg.l = 0;
-	                            event_signal(EV_CONN_CONNECTED, (Object*)conn, arg);
-	                        }
-	                    } else {
-	                        if (is_writable && conn->sendq)
-	                            do_send(conn);
-	                        if (is_readable && conn->recvq)
-	                            do_recv(conn);
-	                    }
-	                    
-	                    conn_dec_ref(conn);
-	                    
-	                    if (n > 0)
-	                         timer_tick();
-	                }
-	            }
-	            mask = ((u_long) mask) >> 1;
-	            ++sd;
-	        } while (mask);
+                    if (is_writable) {
+		    clear_active(conn, WRITE);
+                        conn->state = S_CONNECTED;
+                        arg.l = 0;
+                        event_signal(EV_CONN_CONNECTED, (Object*)conn, arg);
+                    }
+                } else {
+                    if (is_writable && conn->sendq)
+                        do_send(conn);
+                    if (is_readable && conn->recvq)
+                        do_recv(conn);
+                }
+                
+                conn_dec_ref(conn);
+                
+                if (i < nfds)
+                     timer_tick();
+            }
 	    }
 	}
 }
