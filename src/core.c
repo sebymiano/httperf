@@ -1404,17 +1404,7 @@ core_close(Conn * conn)
 	if (sd >= 0) {
 		close(sd);
 #ifndef HAVE_KEVENT
-<<<<<<< HEAD
 	sd_to_conn[sd] = 0;
-=======
-		sd_to_conn[sd] = 0;
-
-        /*if (epoll_ctl(epollfd, EPOLL_CTL_DEL, sd, NULL) == -1) {
-            fprintf(stderr, "epoll_ctl: failed deleting file descriptor %d", sd);
-            exit(1);
-        }*/
->>>>>>> 357b70474c5dcc51750e270d335c035049f17eef
-
 #endif
 		conn->reading = 0;
 		conn->writing = 0;
